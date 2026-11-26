@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#173c37">
+<meta name="color-scheme" content="light">
+<meta name="description" content="Private offline voice notebook. Record, transcribe on-device, tag, search, and share — no server.">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; media-src blob:; manifest-src 'self'; worker-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'">
+<link rel="manifest" href="./manifest.json">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23173c37'/%3E%3Cpath d='M12 32h8l5-15 10 30 6-15h11' fill='none' stroke='%23abf2c9' stroke-width='5' stroke-linejoin='round'/%3E%3C/svg%3E">
+<title>Offline Voice Notes — record, transcribe on-device, search</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f3f4ed;color:#172f2d;font:1rem/1.5 system-ui,sans-serif}main{max-width:50rem;margin:auto;padding:1.25rem 1rem 4rem}header{padding:1.5rem 0}h1,h2,h3,p{margin:0 0 .55rem}h1{font-size:clamp(2.2rem,8vw,3.6rem);line-height:1.04;letter-spacing:-.055em}.eyebrow,small{font-size:.8rem;color:#49615c}.eyebrow{text-transform:uppercase;letter-spacing:.18em;font-weight:750}section,article{background:white;border:1px solid #ccd8d0;border-radius:1rem;padding:1rem;margin-bottom:1rem}.studio{background:#173c37;color:white}.studio small{color:#c4e4d5}button,input{font:inherit}button{cursor:pointer;border:1px solid #b8cdc3;border-radius:.7rem;padding:.55rem .9rem;background:#eff5ee;color:#173c37;min-height:44px}button:disabled{cursor:default;opacity:.56}.primary{background:#abf2c9;border-color:#abf2c9;font-weight:700}input:not([type=checkbox]){display:block;border:1px solid #9bb1a8;border-radius:.55rem;padding:.6rem;width:100%;min-width:0;margin:.25rem 0 .7rem}input[type=checkbox]{width:1.1rem;height:1.1rem;vertical-align:middle}label{display:block}.row{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin:.65rem 0}.live,.text{white-space:pre-wrap;overflow-wrap:anywhere}.live:empty{display:none}.text{border-left:3px solid #a7d8bf;padding-left:.8rem;margin:1rem 0}.noteTitle{overflow-wrap:anywhere}.chip{font-size:.85rem;background:#e2eee6;border-radius:2rem;padding:.15rem .6rem;overflow-wrap:anywhere}audio{width:100%;display:block;margin:.8rem 0}summary{cursor:pointer;padding:.5rem 0}details label{margin-top:.6rem}#notice:not(:empty){padding:.65rem;background:#fff1cd;border-radius:.6rem}button:focus-visible,input:focus-visible,summary:focus-visible{outline:3px solid #e59c34;outline-offset:2px}[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<main>
+<header><p class="eyebrow">Personal audio notebook</p><h1>Offline Voice Notes</h1><p>Record a thought. Find it later.</p><small id="offline">Checking offline support…</small> <button id="install" hidden>Install app</button></header>
+<section class="studio" aria-labelledby="studioTitle">
+<h2 id="studioTitle">Recorder</h2>
+<label><input id="transcribe" type="checkbox" checked> Try on-device transcription</label>
+<small>Uses your browser’s speech support when available. Otherwise, only audio is saved.</small>
+<div class="row"><button class="primary" id="start" disabled>Record note</button><button id="stop" disabled>Stop &amp; save</button><span id="clock">0:00</span></div>
+<p role="status" id="status">Opening notebook…</p><p class="live" id="live"></p>
+<button id="retry" hidden>Retry saving recording</button>
+</section>
+<section aria-labelledby="library"><h2 id="library">Notebook</h2><label for="search">Search notes</label><input type="search" id="search" placeholder="Transcript, title, or tag">
+<div class="row"><button id="bundle" disabled>Export all · JSON</button><button id="txtbundle" disabled>Export all · TXT</button><small id="count"></small></div>
+<small>The JSON bundle is a .tar archive containing a manifest.json plus the original audio files. The text bundle includes transcripts and tags only. Keep an export before clearing browser storage.</small></section>
+<p id="notice" role="status"></p><div id="notes"></div>
+</main>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+let db,notes=[],session=null,pending=null,installEvent=null,urls=[],exporting=false;
+const micOK=()=>!!(navigator.mediaDevices?.getUserMedia && window.MediaRecorder);
+const msg=e=>e?.message||String(e);
+function uuid(){
+ if(typeof crypto!=='undefined'&&crypto.randomUUID)return crypto.randomUUID();
+ return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{const r=Math.random()*16|0,v=c==='x'?r:(r&0x3|0x8);return v.toString(16)});
+}
+function controls(){
+ const ready=!!db&&micOK();
+ $('start').disabled=!ready||!!session||!!pending;
+ $('stop').disabled=!session?.started||!!session?.ending;
+ $('transcribe').disabled=!!session;
+ $('retry').hidden=!pending;
+ $('retry').disabled=!!session;
+ $('bundle').disabled=!notes.length||exporting;
+ $('txtbundle').disabled=!notes.length||exporting;
+}
+function openDB(){return new Promise((resolve,reject)=>{
+ const r=indexedDB.open('offline-voice-notes',1);
+ r.onupgradeneeded=()=>{if(!r.result.objectStoreNames.contains('notes'))r.result.createObjectStore('notes',{keyPath:'id'})};
+ r.onsuccess=()=>resolve(r.result);
+ r.onerror=()=>reject(r.error);
+ r.onblocked=()=>{$('status').textContent='Close other notebook tabs to open storage.'}
+})}
+function store(method,value){return new Promise((resolve,reject)=>{
+ const t=db.transaction('notes',method==='getAll'?'readonly':'readwrite'),s=t.objectStore('notes'),r=s[method](value);
+ r.onerror=()=>reject(r.error);
+ t.oncomplete=()=>resolve(r.result);
+ t.onerror=()=>reject(t.error||new Error('Storage transaction failed'));
+ t.onabort=()=>reject(t.error||new Error('Storage transaction aborted'));
+})}
+function duration(ms){const n=Math.floor(ms/1000);return Math.floor(n/60)+':'+String(n%60).padStart(2,'0')}
+function endSpeech(s){try{s.rec?.stop()}catch{}}
+function speech(s){
+ if(!SR||!$('transcribe').checked){s.speechEnded?.();return}
+ if(!s.speechDone)s.speechDone=new Promise(r=>s.speechEnded=r);
+ const lang=navigator.language||'en-US';
+ let rec;
+ try{rec=new SR()}catch(e){s.speechEnded();return}
+ s.rec=rec;rec.lang=lang;rec.continuous=true;rec.interimResults=true;
+ rec.onresult=e=>{
+  if(session!==s)return;
+  const final=[],partial=[];
+  for(let i=e.resultIndex;i<e.results.length;i++){const res=e.results[i],txt=(res[0]?.transcript||'').trim();if(res.isFinal)final.push(txt);else partial.push(txt)}
+  if(final.length)s.text=(s.text?s.text+' ':'')+final.join(' ');
+  s.partial=partial.join(' ');
+  $('live').textContent=[s.text,s.partial].filter(Boolean).join(' ');
+ };
+ rec.onstart=()=>{if(session===s&&!s.ending)$('status').textContent='Recording · transcribing locally ('+lang+')'};
+ rec.onend=()=>{s.speechEnded();if(session===s&&!s.ending)$('status').textContent='Recording · transcription ended'};
+ rec.onerror=ev=>{
+  if(session!==s)return;
+  if(ev.error==='no-speech'||ev.error==='aborted')return;
+  $('status').textContent='Recording · transcription unavailable ('+ev.error+')';
+ };
+ try{rec.start()}catch(e){s.speechEnded()}
+}
+async function record(){
+ if(session||pending)return;
+ const s={chunks:[],text:'',partial:'',started:false,ending:false,finished:false};session=s;controls();
+ $('notice').textContent='';$('live').textContent='';$('clock').textContent='0:00';$('status').textContent='Waiting for microphone…';
+ s.speechDone=new Promise(r=>s.speechEnded=r);
+ try{
+  s.stream=await navigator.mediaDevices.getUserMedia({audio:true});
+  const r=new MediaRecorder(s.stream);s.r=r;
+  r.ondataavailable=e=>{if(e.data?.size)s.chunks.push(e.data)};
+  r.onerror=e=>{s.warning='Recorder interrupted: '+msg(e.error||e);stop()};
+  r.onstop=()=>finish(s);
+  r.start(1000);s.time=Date.now();s.started=true;
+  s.timer=setInterval(()=>{$('clock').textContent=duration(Date.now()-s.time)},500);
+  controls();$('status').textContent='Recording · audio only';
+  if($('transcribe').checked)speech(s);else s.speechEnded();
+ }catch(e){
+  try{s.stream?.getTracks().forEach(t=>t.stop())}catch{}
+  endSpeech(s);s.speechEnded?.();
+  session=null;controls();
+  $('status').textContent='Could not start recording: '+msg(e);
+ }
+}
+function stop(){
+ const s=session;if(!s?.started||s.ending)return;
+ s.ending=true;controls();$('status').textContent='Finishing recording…';endSpeech(s);
+ try{if(s.r&&s.r.state!=='inactive')s.r.stop()}catch(e){finish(s)}
+}
+async function finish(s){
+ if(s.finished)return;s.finished=true;
+ s.ending=true;controls();clearInterval(s.timer);endSpeech(s);
+ s.stream?.getTracks().forEach(t=>t.stop());
+ if(s.speechDone)await Promise.race([s.speechDone,new Promise(r=>setTimeout(r,1500))]);
+ const ms=Math.max(0,Date.now()-s.time);
+ session=null;$('clock').textContent=duration(ms);$('live').textContent='';
+ const mime=s.r?.mimeType||s.chunks[0]?.type||'application/octet-stream';
+ if(!s.chunks.some(b=>b&&b.size>0)){$('status').textContent='No audio was captured. Check the microphone and try again.';controls();return}
+ const audio=new Blob(s.chunks,{type:mime});
+ pending={id:uuid(),created:s.time,durationMs:ms,title:'Note · '+new Date(s.time).toLocaleString(),tags:[],transcript:[s.text,s.partial].filter(Boolean).join(' '),audio};
+ if(s.warning)$('notice').textContent=s.warning;
+ await savePending();
+}
+async function savePending(){
+ if(!pending||session)return;
+ const holder={ending:true};session=holder;controls();
+ try{
+  await store('put',pending);pending=null;await refresh();
+  $('status').textContent='Note saved on this device.';
+ }catch(e){$('status').textContent='Save failed. Keep this tab open and retry: '+msg(e)}
+ finally{if(session===holder){session=null;controls()}}
+}
+function el(tag,text,cls){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n}
+function action(text,fn){const b=el('button',text);b.onclick=async()=>{b.disabled=true;try{await fn()}catch(e){if(e.name!=='AbortError')$('notice').textContent=msg(e)}finally{b.disabled=false}};return b}
+function audioName(n){const base=(n.audio?.type||'').split(';')[0];const ext={'audio/webm':'webm','audio/mp4':'m4a','audio/ogg':'ogg','audio/wav':'wav','video/mp4':'mp4','audio/mpeg':'mp3'}[base]||'audio';return 'note-'+n.id+'.'+ext}
+async function share(n){
+ const text=[n.title,n.transcript,n.tags.map(t=>'#'+t).join(' ')].filter(Boolean).join('\n\n');
+ if(navigator.share){
+  const file=new File([n.audio],audioName(n),{type:n.audio.type});
+  try{
+   if(navigator.canShare?.({files:[file]})){await navigator.share({title:n.title,text,files:[file]});return}
+  }catch(e){}
+  try{await navigator.share({title:n.title,text});return}catch(e){}
+ }
+ try{
+  await navigator.clipboard.writeText(text);
+  $('notice').textContent='Sharing unavailable. Note text copied to clipboard.';
+ }catch{
+  download(n.audio,audioName(n));
+  $('notice').textContent='Sharing unavailable. Audio file downloaded instead.';
+ }
+}
+async function refresh(){
+ const all=(await store('getAll')).sort((a,b)=>b.created-a.created);
+ notes=all;
+ const terms=$('search').value.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
+ const found=terms.length?all.filter(n=>{const hay=[n.title,n.transcript,...n.tags].join(' ').toLocaleLowerCase();return terms.every(t=>hay.includes(t))}):all;
+ display(found);
+}
+function display(found){
+ $('notes').replaceChildren();urls.forEach(u=>URL.revokeObjectURL(u));urls=[];
+ $('count').textContent=found.length+' of '+notes.length+' notes';
+ if(!found.length)$('notes').append(el('p',notes.length?'No matching notes.':'Your recorded notes will appear here.'));
+ for(const n of found){
+  const a=el('article'),tags=el('div',undefined,'row'),player=el('audio');
+  player.controls=true;player.preload='none';player.src=URL.createObjectURL(n.audio);urls.push(player.src);
+  player.setAttribute('aria-label','Playback: '+n.title);
+  n.tags.forEach(t=>tags.append(el('span','#'+t,'chip')));
+  a.append(el('h3',n.title,'noteTitle'),el('small',new Date(n.created).toLocaleString()+' · '+duration(n.durationMs)),player,el('p',n.transcript||'Audio-only note · no transcript.','text'),tags);
+  const d=el('details'),sum=el('summary','Rename or edit tags'),titleIn=el('input'),tagIn=el('input');
+  titleIn.value=n.title;tagIn.value=n.tags.join(', ');
+  const lt=el('label','Title');lt.append(titleIn);
+  const lg=el('label','Tags (comma-separated)');lg.append(tagIn);
+  d.append(sum,lt,lg,action('Save changes',async()=>{
+   const next={...n,title:titleIn.value.trim()||n.title,tags:[...new Set(tagIn.value.split(',').map(x=>x.trim()).filter(Boolean))]};
+   await store('put',next);await refresh();
+  }));
+  const row=el('div',undefined,'row');row.append(action('Share',()=>share(n)),action('Delete',async()=>{
+   if(!confirm('Delete “'+n.title+'” from this device?'))return;
+   await store('delete',n.id);await refresh();
+  }));a.append(d,row);$('notes').append(a);
+ }
+ controls();
+}
+function strBytes(s,max){const e=new TextEncoder();const b=e.encode(s);const a=new Uint8Array(max);a.set(b.slice(0,max));return a}
+function tarHeader(name,size,mtime=Math.floor(Date.now()/1000)){
+ const h=new Uint8Array(512);
+ const put=(off,buf)=>h.set(buf.slice(0,512-off),off);
+ put(0,strBytes(name.length>99?name.slice(-99):name,100));
+ put(100,strBytes('0000644 ',8));
+ put(108,strBytes('0001750 ',8));
+ put(116,strBytes('0001750 ',8));
+ put(124,strBytes(size.toString(8).padStart(11,'0')+' ',12));
+ put(136,strBytes(mtime.toString(8).padStart(11,'0')+' ',12));
+ put(148,strBytes('        ',8));
+ put(156,strBytes('0',1));
+ put(257,strBytes('ustar\0',6));
+ put(263,strBytes('00',2));
+ let sum=0;for(let i=0;i<512;i++)sum+=(i>=148&&i<156?32:h[i]);
+ put(148,strBytes(sum.toString(8).padStart(6,'0')+'\0 ',8));
+ return h;
+}
+async function buildTar(files){
+ const parts=[];
+ for(const f of files){
+  const buf=new Uint8Array(await f.blob.arrayBuffer());
+  const name=f.name.length>99?f.name.slice(-99):f.name;
+  parts.push(tarHeader(name,buf.length));
+  parts.push(buf);
+  if(buf.length%512)parts.push(new Uint8Array(512-buf.length%512));
+ }
+ parts.push(new Uint8Array(1024));
+ return new Blob(parts,{type:'application/x-tar'});
+}
+function download(blob,filename){const a=el('a');const url=URL.createObjectURL(blob);a.href=url;a.download=filename;a.style.display='none';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000)}
+async function exportJSON(){
+ exporting=true;controls();$('notice').textContent='Preparing JSON bundle…';
+ try{
+  const manifestNotes=[],files=[];
+  for(const n of notes.slice().sort((a,b)=>b.created-a.created)){
+   const fname=audioName(n);
+   manifestNotes.push({id:n.id,created:n.created,durationMs:n.durationMs,title:n.title,tags:[...n.tags],transcript:n.transcript,audioFile:fname});
+   files.push({name:fname,blob:n.audio});
+  }
+  const manifest={format:'offline-voice-notes',version:1,exported:new Date().toISOString(),notes:manifestNotes};
+  files.unshift({name:'manifest.json',blob:new Blob([JSON.stringify(manifest,null,2)],{type:'application/json'})});
+  const tar=await buildTar(files);
+  download(tar,'voice-notes-'+new Date().toISOString().slice(0,10)+'.tar');
+  $('notice').textContent='JSON bundle ready for download.';
+ }catch(e){$('notice').textContent='Export failed: '+msg(e)}finally{exporting=false;controls()}
+}
+async function exportTXT(){
+ exporting=true;controls();$('notice').textContent='Preparing text bundle…';
+ try{
+  const lines=['Offline Voice Notes — text export','Exported: '+new Date().toLocaleString(),'Total notes: '+notes.length,''];
+  for(const n of notes.slice().sort((a,b)=>b.created-a.created)){
+   lines.push('═'.repeat(60));
+   lines.push('Title: '+n.title);
+   lines.push('Date: '+new Date(n.created).toLocaleString());
+   lines.push('Duration: '+duration(n.durationMs));
+   lines.push('Tags: '+(n.tags.length?n.tags.map(t=>'#'+t).join(' '):'none'));
+   lines.push('─'.repeat(60));
+   lines.push(n.transcript||'Audio-only note · no transcript.');
+   lines.push('');
+  }
+  download(new Blob([lines.join('\n')],{type:'text/plain;charset=utf-8'}),'voice-notes-'+new Date().toISOString().slice(0,10)+'.txt');
+  $('notice').textContent='Text bundle ready for download.';
+ }catch(e){$('notice').textContent='Export failed: '+msg(e)}finally{exporting=false;controls()}
+}
+$('start').onclick=record;$('stop').onclick=stop;$('retry').onclick=savePending;$('search').oninput=refresh;
+$('bundle').onclick=exportJSON;$('txtbundle').onclick=exportTXT;
+window.addEventListener('beforeunload',e=>{if(session||pending){e.preventDefault();e.returnValue=''}});
+window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();installEvent=e;$('install').hidden=false});
+$('install').onclick=async()=>{if(!installEvent)return;const e=installEvent;installEvent=null;$('install').hidden=true;try{await e.prompt()}catch{}};
+window.addEventListener('appinstalled',()=>{$('install').hidden=true;installEvent=null});
+(async()=>{
+ try{
+  db=await openDB();await refresh();
+  $('status').textContent=micOK()?'Ready to record.':'Recording needs microphone support and HTTPS or localhost.';
+ }catch(e){db=null;controls();$('status').textContent='Notebook storage unavailable: '+msg(e)}
+})();
+(async()=>{
+ try{
+  if(!('serviceWorker' in navigator))throw new Error();
+  await navigator.serviceWorker.register('./sw.js');await navigator.serviceWorker.ready;
+  $('offline').textContent='Ready offline · stored on this device';
+ }catch{$('offline').textContent='Offline installation unavailable. Open using HTTPS or localhost.'}
+})();
+</script>
+</body>
+</html>

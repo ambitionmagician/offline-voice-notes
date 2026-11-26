@@ -1,0 +1,26 @@
+{
+  "id": "./",
+  "name": "Offline Voice Notes — record, transcribe on-device, search",
+  "short_name": "Voice Notes",
+  "description": "A private offline notebook for audio, local transcripts, and tags.",
+  "lang": "en",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f3f4ed",
+  "theme_color": "#173c37",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='192' height='192' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' fill='%23173c37'/%3E%3Cpath d='M11 32h9l5-15 10 30 6-15h12' fill='none' stroke='%23abf2c9' stroke-width='5' stroke-linejoin='round'/%3E%3C/svg%3E",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='512' height='512' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' fill='%23173c37'/%3E%3Cpath d='M11 32h9l5-15 10 30 6-15h12' fill='none' stroke='%23abf2c9' stroke-width='5' stroke-linejoin='round'/%3E%3C/svg%3E",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
